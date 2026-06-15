@@ -111,7 +111,7 @@ pub fn writeFrame(self: *Mp4Writer, packet: media.Packet) Error!void {
 /// After calling this function, there must be no other call to this
 /// module except for `deinit`.
 pub fn writeTrailer(self: *Mp4Writer) !void {
-    const mdat_size: u32 = @intCast(self.file.logicalPos() - ftyp.size());
+    const mdat_size: u32 = @intCast(self.file.logicalPos() -| ftyp.size());
 
     // Write moov
     var moov = &self.moov;
