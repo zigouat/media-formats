@@ -3,12 +3,8 @@
     .version = "0.0.0",
     .dependencies = .{
         .media = .{
-            .url = "git+https://github.com/zig-streaming/media.git#010b7d8e1a10282758c8a6cd54f4bd8fcec046c7",
-            .hash = "media-0.1.0-qc-dCJzsAACfvL7pUfAyRw0O16yn3G_NPSbL8NIAWSKV",
-        },
-        .zbench = .{
-            .url = "https://github.com/hendriknielaender/zBench/archive/c24d128bfa80ec6a1b495b84ec827c6a0bec7865.tar.gz",
-            .hash = "zbench-0.11.2-YTdc76Q_AQAxonIKZ2-H1PdcESJGwyuYylw6RkPiBqyx",
+            .url = "git+https://github.com/zigouat/media.git#f5514d7be0b9f556349a5a3d7dacc8ea3ba76c61",
+            .hash = "media-0.1.0-qc-dCJfsAADLxr14y6wjRzjCSBKawFydk0esGp4o3kvy",
         },
     },
     .fingerprint = 0x6c6b3c756160e6ed,
@@ -18,7 +14,6 @@
         "build.zig.zon",
         "src",
         "fixtures",
-        "bench",
         "LICENSE",
         "README.md",
     },

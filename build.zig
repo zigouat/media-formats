@@ -15,12 +15,22 @@ pub fn build(b: *std.Build) void {
         },
     });
 
+    const ivf = b.addModule("ivf", .{
+        .root_source_file = b.path("src/ivf/ivf.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "media", .module = media.module("media") },
+        },
+    });
+
     const mod = b.addModule("media-formats", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "mp4", .module = mp4 },
+            .{ .name = "ivf", .module = ivf },
         },
     });
 
@@ -28,8 +38,12 @@ pub fn build(b: *std.Build) void {
         const mp4_tests = b.addTest(.{ .root_module = mp4 });
         const run_mp4_tests = b.addRunArtifact(mp4_tests);
 
+        const ivf_tests = b.addTest(.{ .root_module = ivf });
+        const run_ivf_tests = b.addRunArtifact(ivf_tests);
+
         const test_step = b.step("test", "Run tests");
         test_step.dependOn(&run_mp4_tests.step);
+        test_step.dependOn(&run_ivf_tests.step);
     }
 
     {
