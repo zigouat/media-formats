@@ -37,6 +37,19 @@ const Header = struct {
         return header;
     }
 
+    fn write(header: *const Header, w: *Io.Writer) !void {
+        try w.writeAll(&header.signature);
+        try w.writeInt(u16, header.version, .little);
+        try w.writeInt(u16, header.length, .little);
+        try w.writeInt(u32, header.codec_fourcc, .big);
+        try w.writeInt(u16, header.width, .little);
+        try w.writeInt(u16, header.height, .little);
+        try w.writeInt(u32, header.timebase_den, .little);
+        try w.writeInt(u32, header.timebase_num, .little);
+        try w.writeInt(u32, header.nb_frames, .little);
+        try w.writeInt(u32, header._unused, .little);
+    }
+
     fn toStream(header: *const Header) media.Stream {
         const codec: media.Codec = switch (header.codec_fourcc) {
             0x56503830 => .vp8, // 'VP80'
@@ -51,6 +64,25 @@ const Header = struct {
             .config = .{ .video = .{ .width = header.width, .height = header.height } },
             .time_base = .{ .num = header.timebase_num, .den = header.timebase_den },
             .nb_frames = header.nb_frames,
+        };
+    }
+
+    fn fromStream(stream: *const media.Stream) Header {
+        return .{
+            .signature = "DKIF".*,
+            .version = 0,
+            .length = 32,
+            .codec_fourcc = switch (stream.codec) {
+                .vp8 => 0x56503830, // 'VP80'
+                .vp9 => 0x56503930, // 'VP90'
+                .av1 => 0x41563130, // 'AV10'
+                else => 0,
+            },
+            .width = @intCast(stream.config.video.width),
+            .height = @intCast(stream.config.video.height),
+            .timebase_den = @intCast(stream.time_base.den),
+            .timebase_num = @intCast(stream.time_base.num),
+            .nb_frames = @intCast(stream.nb_frames),
         };
     }
 };
@@ -91,6 +123,40 @@ pub const Reader = struct {
     }
 };
 
+pub const Writer = struct {
+    file_writer: Io.File.Writer,
+    nb_frames: u32 = 0,
+
+    pub fn init(io: Io, dir: ?Io.Dir, path: []const u8, buffer: []u8) !Writer {
+        const base_dir = dir orelse Io.Dir.cwd();
+        const file = try base_dir.createFile(io, path, .{ .truncate = true });
+        return .{ .file_writer = file.writer(io, buffer) };
+    }
+
+    pub fn deinit(writer: *Writer) void {
+        writer.file_writer.file.close(writer.file_writer.io);
+    }
+
+    pub fn writeHeader(writer: *Writer, stream: *const media.Stream) !void {
+        try Header.fromStream(stream).write(&writer.file_writer.interface);
+    }
+
+    pub fn writePacket(writer: *Writer, packet: *const media.Packet) !void {
+        var out = &writer.file_writer.interface;
+
+        try out.writeInt(u32, @intCast(packet.data.len), .little);
+        try out.writeInt(u64, @bitCast(packet.dts), .little);
+        try out.writeAll(packet.data);
+
+        writer.nb_frames += 1;
+    }
+
+    pub fn flush(writer: *Writer) !void {
+        try writer.file_writer.seekTo(24);
+        try writer.file_writer.interface.writeInt(u32, writer.nb_frames, .little);
+    }
+};
+
 const testing = std.testing;
 
 test {
@@ -123,6 +189,32 @@ test "Header: wrong signature" {
     const header = [_]u8{ 0x44, 0x4f, 0x49, 0x46, 0x00, 0x00, 0x20, 0x00 };
     var reader = Io.Reader.fixed(&header);
     try testing.expectError(error.InvalidSignature, Header.parse(&reader));
+}
+
+test "Header: write" {
+    const expected = [_]u8{
+        0x44, 0x4b, 0x49, 0x46, 0x00, 0x00, 0x20, 0x00,
+        0x56, 0x50, 0x38, 0x30, 0x80, 0x07, 0x30, 0x03,
+        0x19, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+        0xf0, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    const header: Header = .{
+        .signature = "DKIF".*,
+        .version = 0,
+        .length = 32,
+        .codec_fourcc = 0x56503830, // VP80
+        .width = 1920,
+        .height = 816,
+        .timebase_den = 25,
+        .timebase_num = 1,
+        .nb_frames = 1008,
+    };
+
+    var dest: [1024]u8 = undefined;
+    var writer = Io.Writer.fixed(&dest);
+    try header.write(&writer);
+    try testing.expectEqualSlices(u8, &expected, writer.buffered());
 }
 
 test "Header: toStream" {
@@ -181,4 +273,37 @@ test "Reader: read all frames" {
     }
 
     try testing.expect(try ivf_reader.next(testing.allocator) == null);
+}
+
+test "Writer: write and read back" {
+    var fs = try Io.Dir.cwd().openFile(testing.io, "fixtures/ivf/test_vp8_10.ivf", .{ .mode = .read_only });
+    defer fs.close(testing.io);
+
+    var buffer: [1024]u8 = @splat(0);
+    var reader = fs.readerStreaming(testing.io, &buffer);
+    var ivf_reader = try Reader.init(&reader.interface);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var out_buffer: [1024]u8 = @splat(0);
+    var writer = try Writer.init(testing.io, tmp.dir, "test_output.ivf", &out_buffer);
+    defer writer.deinit();
+
+    try writer.writeHeader(&ivf_reader.stream);
+
+    while (true) {
+        var packet = try ivf_reader.next(testing.allocator);
+        if (packet == null) break;
+        defer packet.?.deinit(testing.allocator);
+
+        try writer.writePacket(&packet.?);
+    }
+    try writer.flush();
+
+    const content_in = try Io.Dir.cwd().readFileAlloc(testing.io, "fixtures/ivf/test_vp8_10.ivf", testing.allocator, .unlimited);
+    defer testing.allocator.free(content_in);
+    const content_out = try tmp.dir.readFileAlloc(testing.io, "test_output.ivf", testing.allocator, .unlimited);
+    defer testing.allocator.free(content_out);
+    try testing.expectEqualSlices(u8, content_in, content_out);
 }
