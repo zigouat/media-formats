@@ -103,7 +103,7 @@ pub const Header = struct {
     }
 
     pub fn payloadSize(self: *const Header) usize {
-        return @as(usize, self.size) - (if (self.type == .uuid) @as(usize, 16) else @as(usize, 0)) -| Header.box_header_size;
+        return @as(usize, @intCast(self.size)) - (if (self.type == .uuid) @as(usize, 16) else @as(usize, 0)) -| Header.box_header_size;
     }
 
     pub fn parse(reader: *Reader) ReadError!Header {
@@ -202,7 +202,7 @@ pub const Moov = struct {
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *std.Io.Reader) ReadError!Moov {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var mvhd: ?Mvhd = null;
         var traks: std.ArrayList(Trak) = .empty;
         errdefer {
@@ -325,7 +325,7 @@ pub const Trak = struct {
 
     /// Parses the Track Box (trak).
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Trak {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var tkhd: ?Tkhd = null;
         var mdia: ?Mdia = null;
         errdefer if (mdia) |*box| box.deinit(allocator);
@@ -413,7 +413,7 @@ pub const Mvex = struct {
     }
 
     pub fn parse(allocator: Allocator, reader: *Reader, header: Header) ReadError!Mvex {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var mvex = Mvex{ .mehd = null, .trex = .empty };
         errdefer mvex.deinit(allocator);
 
@@ -631,7 +631,7 @@ pub const Mdia = struct {
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Mdia {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var mdhd: ?Mdhd = null;
         var hdlr: ?Hdlr = null;
         errdefer if (hdlr) |*box| box.deinit(allocator);
@@ -805,7 +805,7 @@ pub const Minf = struct {
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Minf {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var stbl: ?Stbl = null;
         var dinf: ?Dinf = null;
         var handler: MediaHandler = .{ .unknown = {} };
@@ -898,7 +898,7 @@ pub const Dref = struct {
         var dref = Dref{ .entries = try .initCapacity(allocator, entry_count) };
         errdefer dref.deinit(allocator);
 
-        var offset: usize = 8;
+        var offset: u64 = 8;
         for (0..entry_count) |_| {
             const inner_header = try Header.parse(reader);
             offset += inner_header.size;
@@ -1055,7 +1055,7 @@ pub const Stbl = struct {
     }
 
     pub fn parse(allocator: Allocator, header: Header, reader: *Reader) ReadError!Stbl {
-        var offset: usize = 0;
+        var offset: u64 = 0;
         var stsd: ?Stsd = null;
         var stts: ?Stts = null;
         var ctts: ?Ctts = null;
@@ -1185,7 +1185,7 @@ pub const Stsd = struct {
         var stsd = Stsd{ .entries = try .initCapacity(allocator, entry_count) };
         errdefer stsd.deinit(allocator);
 
-        var pos: usize = 0;
+        var pos: u64 = 0;
         for (0..entry_count) |_| {
             const inner_header = try Header.parse(reader);
             pos += inner_header.size;
@@ -1297,7 +1297,7 @@ pub const VideoSampleEntry = struct {
 
         _ = try reader.discardAll(50); // reserved
 
-        var offset: usize = 78;
+        var offset: u64 = 78;
         while (offset < header.payloadSize()) {
             const inner_header = try Header.parse(reader);
             offset += inner_header.size;
@@ -1409,7 +1409,7 @@ pub const AudioSampleEntry = struct {
         _ = try reader.discard(.limited(4)); // pre_defined + reserved
         sample_entry.samplerate = try reader.takeInt(u32, .big) >> 16;
 
-        var offset: usize = 28;
+        var offset: u64 = 28;
         while (offset < header.payloadSize()) {
             const inner_header = try Header.parse(reader);
             offset += inner_header.size;
