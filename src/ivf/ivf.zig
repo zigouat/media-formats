@@ -1,3 +1,6 @@
+//! IVF is a simple container format for VP8, VP9 and AV1 video streams.
+//!
+//! It consists of a header and a series of frames, each with a size and timestamp.
 const std = @import("std");
 const media = @import("media");
 
@@ -87,11 +90,22 @@ const Header = struct {
     }
 };
 
+/// A reader for IVF streams.
 pub const Reader = struct {
     reader: *Io.Reader,
     stream: media.Stream,
 
-    pub fn init(reader: *Io.Reader) !Reader {
+    pub const Error = error{
+        /// The header signature doesn't match that of an IVF file.
+        InvalidSignature,
+    } || Io.Reader.Error;
+
+    pub const ReadError = error{
+        /// The frame size is larger than the maximum allowed size.
+        FrameTooLarge,
+    } || Io.Reader.Error || std.mem.Allocator.Error;
+
+    pub fn init(reader: *Io.Reader) Error!Reader {
         var ivf_reader: Reader = undefined;
         ivf_reader.stream = (try Header.parse(reader)).toStream();
         ivf_reader.reader = reader;
@@ -101,7 +115,7 @@ pub const Reader = struct {
     /// Gets the next frame from the stream.
     ///
     /// Note that the returned packet doesn't have a duration.
-    pub fn next(ivf_reader: *Reader, allocator: std.mem.Allocator) !?media.Packet {
+    pub fn next(ivf_reader: *Reader, allocator: std.mem.Allocator) ReadError!?media.Packet {
         const size = ivf_reader.reader.takeInt(u32, .little) catch |err| switch (err) {
             error.EndOfStream => return null,
             else => |e| return e,
@@ -123,6 +137,7 @@ pub const Reader = struct {
     }
 };
 
+/// A writer for IVF streams.
 pub const Writer = struct {
     file_writer: Io.File.Writer,
     nb_frames: u32 = 0,
