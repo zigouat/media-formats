@@ -23,6 +23,7 @@ allocator: Allocator,
 file: Io.File.Writer,
 moov: box.Moov,
 streams: std.ArrayList(Stream),
+err: ?(Io.File.Writer.Error || Io.File.Writer.SeekError),
 
 pub const InitConfig = struct {};
 
@@ -30,7 +31,7 @@ const Stream = struct {
     id: u32,
     trak: *box.Trak,
 
-    fn addSample(stream: *Stream, allocator: Allocator, packet: *const media.Packet, pos: u64) !void {
+    fn addSample(stream: *Stream, allocator: Allocator, packet: *const media.Packet, pos: u64) Allocator.Error!void {
         var stbl = &stream.trak.mdia.minf.stbl;
         const duration: u32 = @intCast(packet.duration.?);
 
@@ -60,6 +61,7 @@ pub fn init(io: Io, allocator: Allocator, dir: ?Io.Dir, dest: []const u8, buffer
             .traks = .empty,
         },
         .streams = try .initCapacity(allocator, 2),
+        .err = null,
     };
 }
 
@@ -71,8 +73,15 @@ pub fn deinit(self: *Mp4Writer, io: Io) void {
 
 /// Writes the header (ftyp box + empty mdat)
 pub fn writeHeader(self: *Mp4Writer) Io.Writer.Error!void {
-    try ftyp.write(&self.file.interface);
-    try box.Header.new(.mdat, 0).write(&self.file.interface);
+    ftyp.write(&self.file.interface) catch {
+        self.err = self.file.err;
+        return error.WriteFailed;
+    };
+
+    box.Header.new(.mdat, 0).write(&self.file.interface) catch {
+        self.err = self.file.err;
+        return error.WriteFailed;
+    };
 }
 
 /// Adds a new stream to the file.
@@ -98,7 +107,10 @@ pub fn addStream(self: *Mp4Writer, stream: *const media.Stream) Error!void {
 pub fn writeFrame(self: *Mp4Writer, packet: media.Packet) Error!void {
     for (self.streams.items) |*stream| if (stream.id == packet.stream_id) {
         const pos = self.file.logicalPos();
-        try self.file.interface.writeAll(packet.data);
+        self.file.interface.writeAll(packet.data) catch {
+            self.err = self.file.err;
+            return error.WriteFailed;
+        };
         try stream.addSample(self.allocator, &packet, pos);
         return;
     };
@@ -111,6 +123,16 @@ pub fn writeFrame(self: *Mp4Writer, packet: media.Packet) Error!void {
 /// After calling this function, there must be no other call to this
 /// module except for `deinit`.
 pub fn writeTrailer(self: *Mp4Writer) !void {
+    self.doWriteTrailer() catch |err| switch (err) {
+        error.WriteFailed => {
+            self.err = self.file.err orelse self.file.seek_err;
+            return error.WriteFailed;
+        },
+        else => |e| return e,
+    };
+}
+
+fn doWriteTrailer(self: *Mp4Writer) !void {
     const mdat_size: u32 = @intCast(self.file.logicalPos() -| ftyp.size());
 
     // Write moov
