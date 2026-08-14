@@ -12,109 +12,6 @@ pub const Error = error{
     Unseekable,
 } || std.Io.File.OpenError || box.ReadError;
 
-io: Io,
-file: Io.File,
-moov: box.Moov,
-
-/// Creates a new mp4 reader.
-pub fn init(io: Io, allocator: std.mem.Allocator, dir: ?Io.Dir, src: []const u8) Error!Mp4Reader {
-    const base_dir = dir orelse Io.Dir.cwd();
-    const file = try base_dir.openFile(io, src, .{ .mode = .read_only });
-
-    var reader = Mp4Reader{
-        .io = io,
-        .file = file,
-        .moov = .{
-            .mvhd = undefined,
-            .traks = .empty,
-        },
-    };
-    errdefer reader.deinit(allocator);
-
-    try reader.readMoov(allocator);
-    return reader;
-}
-
-pub fn deinit(self: *Mp4Reader, allocator: std.mem.Allocator) void {
-    self.file.close(self.io);
-    self.moov.deinit(allocator);
-}
-
-/// Gets an interator over all the streams in the file.
-///
-/// The stream data owned by the reader and should not be freeed or used after the reader is deinitialized.
-pub fn streamIterator(self: *const Mp4Reader) StreamIterator {
-    return .init(&self.moov);
-}
-
-/// Read a single frame from the specified stream and frame index. Returns null if the stream or frame is not found.
-///
-/// This is a slow operation that seeks to the frame's offset and reads it. For better performance, use `frameIterator` to read frames sequentially.
-pub fn readFrame(self: *Mp4Reader, media_allocator: std.mem.Allocator, stream_id: u32, frame_idx: usize) !?media.Packet {
-    var maybe_trak: ?*const box.Trak = null;
-    for (self.moov.traks.items) |*in_trak| if (in_trak.tkhd.track_id == stream_id) {
-        maybe_trak = in_trak;
-        break;
-    };
-
-    if (maybe_trak) |trak| {
-        var iterator = trak.sampleIterator();
-        iterator.skip(@intCast(frame_idx));
-
-        if (iterator.next()) |*sample| {
-            var packet = try media.Packet.alloc(media_allocator, sample.size);
-            errdefer packet.deinit(media_allocator);
-
-            var reader = self.file.reader(self.io, &.{});
-            try reader.seekTo(sample.offset);
-            try reader.interface.readSliceAll(packet.mutableData().?);
-
-            packet.dts = @intCast(sample.dts);
-            packet.pts = @intCast(sample.pts);
-            packet.duration = sample.duration;
-            packet.flags.keyframe = sample.is_sync;
-            packet.stream_id = stream_id;
-
-            return packet;
-        }
-    }
-
-    return null;
-}
-
-/// Creates an iterator that reads frames sequentially from all streams. Frames are sorted in decoding order (based on DTS).
-pub fn frameIterator(self: *Mp4Reader, allocator: std.mem.Allocator, buffer: []u8) !FrameIterator {
-    return try FrameIterator.init(
-        allocator,
-        self.io,
-        self.file,
-        &self.moov,
-        buffer,
-    );
-}
-
-fn readMoov(self: *Mp4Reader, allocator: std.mem.Allocator) !void {
-    var buffer: [1024]u8 = undefined;
-    var reader = self.file.reader(self.io, &buffer);
-
-    var moov_found: bool = false;
-
-    while (true) {
-        const header = try box.Header.parse(&reader.interface);
-        switch (header.type) {
-            .moov => {
-                self.moov = try box.Moov.parse(allocator, header, &reader.interface);
-                moov_found = true;
-                break;
-            },
-            else => try reader.seekBy(@intCast(header.payloadSize())),
-        }
-    }
-
-    if (!moov_found) return error.InvalidFile;
-    if (self.moov.mvex != null) return error.UnsupportedFile;
-}
-
 pub const StreamIterator = struct {
     traks: []box.Trak,
 
@@ -173,28 +70,6 @@ pub const StreamIterator = struct {
     }
 };
 
-const Stream = struct {
-    iterator: box.SampleIterator,
-    timescale: u32,
-    id: u32,
-
-    fn sampleOffset(self: *Stream) u64 {
-        if (self.iterator.peek()) |*sample| {
-            return sample.offset;
-        }
-
-        return std.math.maxInt(u64);
-    }
-
-    fn sampleDts(self: *Stream) u64 {
-        if (self.iterator.peek()) |*sample| {
-            return sample.dts;
-        }
-
-        return std.math.maxInt(u64);
-    }
-};
-
 pub const FrameIterator = struct {
     streams: []Stream,
     reader: Io.File.Reader,
@@ -235,7 +110,7 @@ pub const FrameIterator = struct {
             errdefer packet.deinit(media_allocator);
 
             try self.reader.seekTo(sample_metadata.offset);
-            try self.reader.interface.readSliceAll(packet.mutableData().?);
+            try readFramePayload(&self.reader, &packet);
 
             packet.dts = @intCast(sample_metadata.dts);
             packet.pts = @intCast(sample_metadata.pts);
@@ -249,6 +124,34 @@ pub const FrameIterator = struct {
         }
 
         return null;
+    }
+
+    pub fn peek(self: *FrameIterator, media_allocator: std.mem.Allocator) !?media.Packet {
+        if (self.min_stream) |stream| {
+            const sample_metadata = stream.iterator.peek().?;
+            var packet = try media.Packet.alloc(media_allocator, sample_metadata.size);
+            errdefer packet.deinit(media_allocator);
+
+            try self.reader.seekTo(sample_metadata.offset);
+            try readFramePayload(&self.reader, &packet);
+
+            packet.dts = @intCast(sample_metadata.dts);
+            packet.pts = @intCast(sample_metadata.pts);
+            packet.duration = sample_metadata.duration;
+            packet.flags.keyframe = sample_metadata.is_sync;
+            packet.stream_id = stream.id;
+
+            return packet;
+        }
+
+        return null;
+    }
+
+    pub fn skip(self: *FrameIterator) void {
+        if (self.min_stream) |stream| {
+            stream.iterator.skip(1);
+            self.min_stream = self.getMinStream();
+        }
     }
 
     pub fn deinit(self: *FrameIterator, allocator: std.mem.Allocator) void {
@@ -270,6 +173,148 @@ pub const FrameIterator = struct {
         return if (min_dts != std.math.maxInt(u64)) &self.streams[min_idx] else null;
     }
 };
+
+const Stream = struct {
+    iterator: box.SampleIterator,
+    timescale: u32,
+    id: u32,
+
+    fn sampleOffset(self: *Stream) u64 {
+        if (self.iterator.peek()) |*sample| {
+            return sample.offset;
+        }
+
+        return std.math.maxInt(u64);
+    }
+
+    fn sampleDts(self: *Stream) u64 {
+        if (self.iterator.peek()) |*sample| {
+            return sample.dts;
+        }
+
+        return std.math.maxInt(u64);
+    }
+};
+
+io: Io,
+file: Io.File,
+moov: box.Moov,
+err: ?Io.File.Reader.Error = null,
+
+/// Creates a new mp4 reader.
+pub fn init(io: Io, allocator: std.mem.Allocator, dir: ?Io.Dir, src: []const u8) Error!Mp4Reader {
+    const base_dir = dir orelse Io.Dir.cwd();
+    const file = try base_dir.openFile(io, src, .{ .mode = .read_only });
+
+    var reader = Mp4Reader{
+        .io = io,
+        .file = file,
+        .moov = .{
+            .mvhd = undefined,
+            .traks = .empty,
+        },
+    };
+    errdefer reader.deinit(allocator);
+
+    try reader.readMoov(allocator);
+    return reader;
+}
+
+pub fn deinit(self: *Mp4Reader, allocator: std.mem.Allocator) void {
+    self.file.close(self.io);
+    self.moov.deinit(allocator);
+}
+
+/// Gets an interator over all the streams in the file.
+///
+/// The stream data owned by the reader and should not be freeed or used after the reader is deinitialized.
+pub fn streamIterator(self: *const Mp4Reader) StreamIterator {
+    return .init(&self.moov);
+}
+
+/// Read a single frame from the specified stream and frame index. Returns null if the stream or frame is not found.
+///
+/// This is a slow operation that seeks to the frame's offset and reads it. For better performance, use `frameIterator` to read frames sequentially.
+pub fn readFrame(self: *Mp4Reader, media_allocator: std.mem.Allocator, stream_id: u32, frame_idx: usize) !?media.Packet {
+    var maybe_trak: ?*const box.Trak = null;
+    for (self.moov.traks.items) |*in_trak| if (in_trak.tkhd.track_id == stream_id) {
+        maybe_trak = in_trak;
+        break;
+    };
+
+    if (maybe_trak) |trak| {
+        var iterator = trak.sampleIterator();
+        iterator.skip(@intCast(frame_idx));
+
+        if (iterator.next()) |*sample| {
+            var packet = try media.Packet.alloc(media_allocator, sample.size);
+            errdefer packet.deinit(media_allocator);
+
+            var reader = self.file.reader(self.io, &.{});
+            try reader.seekTo(sample.offset);
+            try readFramePayload(&reader, &packet);
+
+            packet.dts = @intCast(sample.dts);
+            packet.pts = @intCast(sample.pts);
+            packet.duration = sample.duration;
+            packet.flags.keyframe = sample.is_sync;
+            packet.stream_id = stream_id;
+
+            return packet;
+        }
+    }
+
+    return null;
+}
+
+/// Creates an iterator that reads frames sequentially from all streams. Frames are sorted in decoding order (based on DTS).
+pub fn frameIterator(self: *Mp4Reader, allocator: std.mem.Allocator, buffer: []u8) !FrameIterator {
+    return try FrameIterator.init(
+        allocator,
+        self.io,
+        self.file,
+        &self.moov,
+        buffer,
+    );
+}
+
+fn readMoov(self: *Mp4Reader, allocator: std.mem.Allocator) !void {
+    var buffer: [1024]u8 = undefined;
+    var reader = self.file.reader(self.io, &buffer);
+
+    var moov_found: bool = false;
+
+    while (true) {
+        const header = try box.Header.parse(&reader.interface);
+        switch (header.type) {
+            .moov => {
+                self.moov = box.Moov.parse(allocator, header, &reader.interface) catch |err| switch (err) {
+                    error.ReadFailed => {
+                        self.err = reader.err;
+                        return error.ReadFailed;
+                    },
+                    else => |e| return e,
+                };
+                moov_found = true;
+                break;
+            },
+            else => try reader.seekBy(@intCast(header.payloadSize())),
+        }
+    }
+
+    if (!moov_found) return error.InvalidFile;
+    if (self.moov.mvex != null) return error.UnsupportedFile;
+}
+
+fn readFramePayload(reader: *Io.File.Reader, packet: *media.Packet) !void {
+    reader.interface.readSliceAll(packet.mutableData().?) catch |err| switch (err) {
+        error.ReadFailed => {
+            reader.err = reader.err;
+            return error.ReadFailed;
+        },
+        else => |e| return e,
+    };
+}
 
 const testing = std.testing;
 

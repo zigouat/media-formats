@@ -4,49 +4,6 @@ const media = @import("media");
 
 const Box = mp4.Box;
 
-const H264ParameterSetIterator = struct {
-    data: []const u8,
-    offset: usize = 0,
-    num_sps: u8,
-    num_pps: u8 = 0,
-
-    fn init(data: []const u8) H264ParameterSetIterator {
-        return .{ .data = data, .num_sps = data[0] & 0x1F, .offset = 1 };
-    }
-
-    fn next(self: *H264ParameterSetIterator) ?[]const u8 {
-        if (self.offset >= self.data.len) return null;
-
-        if (self.num_sps > 0) {
-            if (self.getNalu()) |result| {
-                self.num_sps -= 1;
-                if (self.num_sps == 0) {
-                    self.num_pps = self.data[self.offset];
-                    self.offset += 1;
-                }
-
-                return result;
-            }
-
-            return null;
-        }
-
-        if (self.num_pps == 0) return null;
-        if (self.getNalu()) |result| {
-            self.num_pps -= 1;
-            return result;
-        }
-        return null;
-    }
-
-    fn getNalu(self: *H264ParameterSetIterator) ?[]const u8 {
-        const nal_size = std.mem.readInt(u16, self.data[self.offset..][0..2], .big);
-        self.offset += nal_size + 2;
-        if (self.offset > self.data.len) return null;
-        return self.data[self.offset - nal_size .. self.offset];
-    }
-};
-
 /// This example shows how to read an MP4 file and write it back to disk in Annex B format, which is a common format for H.264/H.265 video streams.
 /// The code reads the MP4 file, extracts the video track, and writes the video data in Annex B format to a new file.
 pub fn main(init: std.process.Init) !void {
@@ -61,7 +18,7 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
 
-    var reader = try mp4.Reader.init(init.io, init.gpa, source.?);
+    var reader = try mp4.Reader.init(init.io, init.gpa, null, source.?);
     defer reader.deinit(init.gpa);
 
     // Get the video track id
@@ -81,7 +38,7 @@ pub fn main(init: std.process.Init) !void {
     const codec_config = video_stream.?.extra_data;
     const nalu_length = switch (video_stream.?.codec) {
         .h264 => blk: {
-            const config = try media.h264.DecoderConfigurationRecord.parse(codec_config);
+            const config = try media.codecs.h264.DecoderConfigurationRecord.parse(codec_config);
             break :blk config.length_size;
         },
         .h265 => blk: {
@@ -105,10 +62,11 @@ pub fn main(init: std.process.Init) !void {
 
     switch (video_stream.?.codec) {
         .h264 => {
-            var ps_iterator = H264ParameterSetIterator.init(codec_config[5..]);
-            while (ps_iterator.next()) |parameter_set| {
-                try file_writer.interface.writeAll(&[4]u8{ 0, 0, 0, 1 });
-                try file_writer.interface.writeAll(parameter_set);
+            var dcr = try media.codecs.h264.DecoderConfigurationRecord.parse(codec_config);
+            var it = dcr.iterateParameterSets();
+            while (try it.next()) |nalu| {
+                try file_writer.interface.writeAll(&media.codecs.h264.annexb_start_code);
+                try file_writer.interface.writeAll(nalu);
             }
         },
         else => {},
@@ -133,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
                 else => return err,
             };
 
-            try file_writer.interface.writeAll(&[4]u8{ 0, 0, 0, 1 });
+            try file_writer.interface.writeAll(&media.codecs.h264.annexb_start_code);
             try file_writer.interface.writeAll(try sample_reader.take(nalu_size));
         }
     }

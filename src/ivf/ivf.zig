@@ -156,7 +156,7 @@ pub const Writer = struct {
         try Header.fromStream(stream).write(&writer.file_writer.interface);
     }
 
-    pub fn writePacket(writer: *Writer, packet: *const media.Packet) !void {
+    pub fn writeFrame(writer: *Writer, packet: *const media.Packet) !void {
         var out = &writer.file_writer.interface;
 
         try out.writeInt(u32, @intCast(packet.data.len), .little);
@@ -312,7 +312,7 @@ test "Writer: write and read back" {
         if (packet == null) break;
         defer packet.?.deinit(testing.allocator);
 
-        try writer.writePacket(&packet.?);
+        try writer.writeFrame(&packet.?);
     }
     try writer.flush();
 
