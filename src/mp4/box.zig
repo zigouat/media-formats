@@ -108,7 +108,7 @@ pub const Header = struct {
 
     pub fn parse(reader: *Reader) ReadError!Header {
         var size: u64 = try reader.takeInt(u32, .big);
-        const box_type: BoxType = @enumFromInt(try reader.takeInt(u32, .big));
+        const box_type: BoxType = @fromBackingInt(@intCast(try reader.takeInt(u32, .big)));
 
         if (size == 1) {
             size = try reader.takeInt(u64, .big);
@@ -132,11 +132,11 @@ pub const Header = struct {
         if (self.size > std.math.maxInt(u32)) {
             @branchHint(.unlikely);
             try writer.writeInt(u32, 1, .big);
-            try writer.writeInt(u32, @intFromEnum(self.type), .big);
+            try writer.writeInt(u32, @backingInt(self.type), .big);
             try writer.writeInt(u64, self.size, .big);
         } else {
             try writer.writeInt(u32, @intCast(self.size), .big);
-            try writer.writeInt(u32, @intFromEnum(self.type), .big);
+            try writer.writeInt(u32, @backingInt(self.type), .big);
         }
 
         if (self.type == .uuid) try writer.writeAll(&self.uuid.?);
@@ -1284,7 +1284,7 @@ pub const VideoSampleEntry = struct {
             .width = 0,
             .height = 0,
             .codec_config = &.{},
-            .tag = @intFromEnum(header.type),
+            .tag = @backingInt(header.type),
         };
         errdefer sample_entry.deinit(allocator);
 
@@ -1418,7 +1418,7 @@ pub const AudioSampleEntry = struct {
                 .esds => {
                     const data = try reader.take(inner_header.payloadSize());
                     sample_entry.codec = .aac;
-                    sample_entry.tag = @intFromEnum(inner_header.type);
+                    sample_entry.tag = @backingInt(inner_header.type);
                     sample_entry.codec_config = try allocator.dupe(u8, data);
                 },
                 else => _ = try reader.discard(.limited(inner_header.payloadSize())),
@@ -2175,7 +2175,7 @@ test "Mvhd: version 0 parse" {
         0x00, 0x00, 0x00, 0x02, // modification_time = 2
         0x00, 0x00, 0x0B, 0xB8, // timescale = 3000
         0x00, 0x00, 0x03, 0xE8, // duration = 1000
-    } ++ [_]u8{0} ** 76 ++ [_]u8{
+    } ++ @as([76]u8, @splat(0)) ++ [_]u8{
         0x00, 0x00, 0x00, 0x02, // next_track_id = 2
     };
     var reader = Reader.fixed(&data);
@@ -2201,7 +2201,7 @@ test "Mvhd: version 1 parse" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // modification_time = 2
         0x00, 0x00, 0x0B, 0xB8, // timescale = 3000
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // duration = 1000
-    } ++ [_]u8{0} ** 76 ++ [_]u8{
+    } ++ @as([76]u8, @splat(0)) ++ [_]u8{
         0x00, 0x00, 0x00, 0x02, // next_track_id = 2
     };
     var reader = Reader.fixed(&data);
@@ -2578,7 +2578,7 @@ test "VideoSampleEntry: parses avc1 without codec config" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x07, 0x80, // width = 1920
         0x04, 0x38, // height = 1080
-    } ++ [_]u8{0} ** 50; // horizresolution, vertresolution, reserved, frame_count, compressorname, depth, pre_defined
+    } ++ @as([50]u8, @splat(0)); // horizresolution, vertresolution, reserved, frame_count, compressorname, depth, pre_defined
 
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
@@ -2603,7 +2603,7 @@ test "VideoSampleEntry: parses avc1 with avcC codec config" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x07, 0x80, // width = 1920
         0x04, 0x38, // height = 1080
-    } ++ [_]u8{0} ** 50 ++ [_]u8{ // reserved
+    } ++ @as([50]u8, @splat(0)) ++ [_]u8{ // reserved
         0x00, 0x00, 0x00, 0x0C, // avcC size = 12
         'a', 'v', 'c', 'C', // type = avcC
         0x01, 0x64, 0x00, 0x1F, // avcC config bytes
@@ -2626,7 +2626,7 @@ test "VideoSampleEntry: rejects payload too small" {
     const data = [_]u8{
         0x00, 0x00, 0x00, 0x55, // size = 85
         'a', 'v', 'c', '1', // type = avc1
-    } ++ [_]u8{0} ** 77;
+    } ++ @as([77]u8, @splat(0));
 
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
@@ -2694,7 +2694,7 @@ test "AudioSampleEntry: rejects payload too small" {
     const data = [_]u8{
         0x00, 0x00, 0x00, 0x23, // size = 35
         'm', 'p', '4', 'a', // type = mp4a
-    } ++ [_]u8{0} ** 27;
+    } ++ @as([27]u8, @splat(0));
 
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
@@ -2716,7 +2716,7 @@ test "Stsd: parses video sample entry" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x07, 0x80, // width = 1920
         0x04, 0x38, // height = 1080
-    } ++ [_]u8{0} ** 50; // reserved
+    } ++ @as([50]u8, @splat(0)); // reserved
 
     var reader = Reader.fixed(&data);
     const header = try Header.parse(&reader);
@@ -3117,7 +3117,7 @@ test "Tkhd: version 0 parse" {
         0x00, 0x00, 0x00, 0x03, // track_id = 3
         0x00, 0x00, 0x00, 0x00, // reserved
         0x00, 0x00, 0x02, 0xBC, // duration = 700
-    } ++ [_]u8{0} ** 52 ++ [_]u8{ // reserved + matrix
+    } ++ @as([52]u8, @splat(0)) ++ [_]u8{ // reserved + matrix
         0x07, 0x80, 0x00, 0x00, // width = 1920 in 16.16 fixed-point
         0x04, 0x38, 0x00, 0x00, // height = 1080 in 16.16 fixed-point
     };
@@ -3146,7 +3146,7 @@ test "Tkhd: version 1 parse" {
         0x00, 0x00, 0x00, 0x05, // track_id = 5
         0x00, 0x00, 0x00, 0x00, // reserved
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0B, 0xB8, // duration = 3000
-    } ++ [_]u8{0} ** 52 ++ [_]u8{
+    } ++ @as([52]u8, @splat(0)) ++ [_]u8{
         0x07, 0x80, 0x00, 0x00, // width = 0x07800000
         0x04, 0x38, 0x00, 0x00, // height = 0x04380000
     };
@@ -4008,7 +4008,7 @@ test "VideoSampleEntry: parses hvc1 with hvcC config" {
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x07, 0x80, // width = 1920
         0x04, 0x38, // height = 1080
-    } ++ [_]u8{0} ** 50 ++ [_]u8{
+    } ++ @as([50]u8, @splat(0)) ++ [_]u8{
         0x00, 0x00, 0x00, 0x0C, // hvcC size = 12
         'h', 'v', 'c', 'C', // type = hvcC
         0x01, 0x01, 0x60, 0x00, // hvcC config bytes
